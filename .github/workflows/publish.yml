@@ -1,0 +1,101 @@
+name: Build and release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream peazip/PeaZip tag (empty = latest release)
+        required: false
+        default: ""
+  schedule:
+    - cron: "17 4 * * *"
+  push:
+    branches: [main]
+
+concurrency:
+  group: package
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Fetch and repack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ github.event.inputs.tag }}
+        run: bash scripts/fetch-and-repack.sh
+
+      - name: Record version
+        id: meta
+        run: |
+          echo "tag=$(cat out/upstream-tag.txt)" >> "$GITHUB_OUTPUT"
+          echo "version=$(cat out/version.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload debs
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs
+          path: |
+            out/*.deb
+            out/upstream-tag.txt
+            out/version.txt
+          if-no-files-found: error
+
+      - name: Check existing release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.meta.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: steps.release.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.meta.outputs.version }}
+          name: PeaZip ${{ steps.meta.outputs.version }}
+          body: |
+            Unofficial Debian packages of [PeaZip ${{ steps.meta.outputs.tag }}](https://github.com/peazip/PeaZip/releases/tag/${{ steps.meta.outputs.tag }}),
+            repacked as `peazip-qt6` and `peazip-gtk2`.
+
+            Install from the combined APT repo: https://jochemkuipers.github.io/apt-repo
+          files: |
+            out/peazip-qt6_*.deb
+            out/peazip-gtk2_*.deb
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+
+      - name: Summary
+        run: |
+          {
+            echo "## PeaZip ${{ steps.meta.outputs.tag }}"
+            echo
+            if [[ "${{ steps.release.outputs.exists }}" == "true" ]]; then
+              echo "Release \`v${{ steps.meta.outputs.version }}\` already existed; skipped upload."
+            else
+              echo "Published release \`v${{ steps.meta.outputs.version }}\`."
+            fi
+            echo
+            echo "Install from \`https://jochemkuipers.github.io/apt-repo\`"
+            echo
+            echo '```sh'
+            echo 'curl -fsSL https://jochemkuipers.github.io/apt-repo/jochem.sources | sudo tee /etc/apt/sources.list.d/jochem.sources'
+            echo 'sudo apt update'
+            echo 'sudo apt install peazip-qt6   # or peazip-gtk2'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
